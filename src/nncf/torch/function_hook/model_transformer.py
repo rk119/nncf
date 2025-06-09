@@ -61,6 +61,8 @@ class PT2ModelTransformer(ModelTransformer[GraphModelWrapper]):
         transformations = transformation_layout.transformations
         aggregated_transformations: dict[type, list[Command]] = defaultdict(list)
         for transformation in transformations:
+            if transformation is None:
+                continue
             transformation_cls = transformation.__class__
             if transformation_cls not in [x[0] for x in self._command_transformation_ordered_pairs]:
                 msg = f"Unsupported transformation: {transformation_cls}"

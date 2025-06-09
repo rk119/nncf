@@ -82,6 +82,7 @@ def get_weight_compression_configuration(
     scale_estimation: Optional[bool] = None,
     gptq: Optional[bool] = None,
     lora_correction: Optional[bool] = None,
+    gemlite: Optional[bool] = None,
     ignored_scope: Optional[IgnoredScope] = None,
     sensitivity_metric: Optional[SensitivityMetric] = None,
     backup_mode: Optional[BackupMode] = None,
@@ -107,6 +108,7 @@ def get_weight_compression_configuration(
         "scale_estimation": scale_estimation or False,
         "gptq": gptq or False,
         "lora_correction": lora_correction or False,
+        "gemlite": gemlite or False,
         "ignored_scope": ignored_scope or IgnoredScope(),
         "sensitivity_metric": (
             (
@@ -264,6 +266,7 @@ class WeightCompression(Algorithm):
         scale_estimation: bool,
         gptq: bool,
         lora_correction: bool,
+        gemlite: bool,
         backup_mode: BackupMode = BackupMode.INT8_ASYM,
         compression_format: CompressionFormat = CompressionFormat.DQ,
         advanced_parameters: Optional[AdvancedCompressionParameters] = None,
@@ -322,6 +325,7 @@ class WeightCompression(Algorithm):
         self._scale_estimation = scale_estimation
         self._gptq = gptq
         self._lora_correction = lora_correction
+        self._gemlite = gemlite
         self._backup_mode = backup_mode
         self._compression_format = compression_format
         self._advanced_parameters = (

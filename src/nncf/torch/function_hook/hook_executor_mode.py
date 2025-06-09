@@ -27,6 +27,7 @@ from weakref import ref
 import torch
 from torch import Tensor
 from torch import nn
+from nncf.torch.quantization.kernel_tensor_impl import TorchBaseTensor
 from torch.overrides import TorchFunctionMode
 
 from nncf.common.logging import nncf_logger as logger
@@ -229,6 +230,11 @@ class FunctionHookMode(TorchFunctionMode):
 
         fn_name = func.__name__
 
+        if args and isinstance(args[0], TorchBaseTensor):
+            # If the first argument is a TorchBaseTensor, we assume it's a wrapped tensor
+            # and we call the original function directly without hooks.
+            return func(*args, **kwargs)
+        
         # WA: to catch nested calls for some functions
         # https://github.com/pytorch/pytorch/issues/55093
         fn_for_nested_call = get_handle_inner_function(func)

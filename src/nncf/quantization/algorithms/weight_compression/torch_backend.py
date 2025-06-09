@@ -75,6 +75,7 @@ from nncf.torch.quantization.layers import PTLoraNLSSpec
 from nncf.torch.quantization.layers import PTLoraSpec
 from nncf.torch.quantization.layers import PTQuantizerSpec
 from nncf.torch.quantization.layers import SQMultiply
+from nncf.torch.quantization.kernel_tensor_impl import GemWeight, GemliteTensorImpl
 
 
 class PTWeightCompressionAlgoBackend(WeightCompressionAlgoBackend):
@@ -408,6 +409,13 @@ class PTWeightCompressionAlgoBackend(WeightCompressionAlgoBackend):
 
         compression_config = wc_params.compression_config
         # creates weight decompressor
+        if compression_config.gemlite and isinstance(module, torch.nn.Linear):
+            impl = GemliteTensorImpl.pack_weights(compressed_weight.tensor.data, compressed_weight.scale.data, None,
+                group_size=weight_shape[-1] if compression_config.group_size == -1 else compression_config.group_size,
+                bit_width=4 if compression_config.mode in [CompressWeightsMode.INT4_SYM, CompressWeightsMode.INT4_ASYM] else 8,
+            )
+            module.weight = torch.nn.Parameter(GemWeight(impl), requires_grad=False)
+            return None
         if compression_config.mode == CompressWeightsMode.INT8_SYM:
             decompressor = INT8SymmetricWeightsDecompressor(compressed_weight.scale.data, result_dtype=weight_dtype)
         elif compression_config.mode == CompressWeightsMode.INT8_ASYM:
