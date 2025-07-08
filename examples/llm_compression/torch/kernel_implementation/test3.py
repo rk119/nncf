@@ -440,4 +440,4 @@ if __name__ == "__main__":
     parser.add_argument("--compression", type=str, default="", help="Compression, e.g. 'gemlite'")
     parser.add_argument("--mode", type=str, default="", help="Quantization mode, e.g. 'int8_sym'")
     args = parser.parse_args()
-    main(quantization=args.quantization, mode=args.mode)
+    main(quantization=args.compression, mode=args.mode)

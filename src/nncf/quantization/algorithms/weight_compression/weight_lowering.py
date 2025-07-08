@@ -417,7 +417,7 @@ def do_integer_quantization(
         raise ValueError(msg)
 
     # When reduction axes are not provided, assuming that the weights are already reshaped
-    if config.group_size != -1 and reduction_axes is not None and not config.gemlite:
+    if config.group_size != -1 and reduction_axes is not None:
         # weights are reshaped from [a1, r, a2] to [a1, r//gs, gs, a2]
         weight, reduction_axes = reshape_weight_for_grouped_quantization(weight, reduction_axes, config.group_size)
 
