@@ -1,0 +1,133 @@
+import os
+import pwd
+import time
+import argparse
+import torch
+from nncf.parameters import CompressWeightsMode
+import gemlite
+from torch.profiler import profile as prof, record_function, ProfilerActivity
+
+import nncf
+import nncf.torch
+
+def main(compression="", mode="", profile=False):
+
+    class SimpleLinearModel(torch.nn.Module):
+        def __init__(self, input_dim: int, output_dim: int):
+            super().__init__()
+            self.linear = torch.nn.Linear(input_dim, output_dim, dtype=torch.float16)
+            self.relu = torch.nn.ReLU()
+            self.linear2 = torch.nn.Linear(output_dim, output_dim, dtype=torch.float16)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            l = self.linear(x)
+            l = self.relu(l)
+            l = self.linear2(l)
+            return l
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    batch_size, input_dim, output_dim = 32, 256, 512
+    model = SimpleLinearModel(input_dim, output_dim).to(device)
+
+    model.eval()
+    x = torch.randn(batch_size, input_dim, device=device, dtype=torch.float16)
+
+    static_input  = torch.randn(batch_size, input_dim,  device=device, dtype=torch.float16)
+    static_output = torch.empty(batch_size, output_dim, device=device, dtype=torch.float16)
+
+    for _ in range(10):
+        ch1 = model(x)
+
+    if profile:
+        activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA]
+
+        with prof(activities=activities) as p:
+            model(x) 
+        
+        p.export_chrome_trace("before_compress_torch.json")   
+
+    if mode == "int8_sym":
+        mode = CompressWeightsMode.INT8_SYM
+
+    elif mode == "int8_asym":
+        mode = CompressWeightsMode.INT8_ASYM
+
+    elif mode == "int4_sym":
+        mode = CompressWeightsMode.INT4_SYM
+
+    elif mode == "int4_asym":
+        mode = CompressWeightsMode.INT4_ASYM
+
+    if compression == "gemlite":
+        gemlite.set_autotune("max")
+        config_file = f"/tmp/{pwd.getpwuid(os.getuid()).pw_gecos}_gemlite.json"
+        gemlite.load_config(config_file)
+
+        model = nncf.compress_weights(model, dataset=nncf.Dataset([x]), mode=mode, gemlite=True)
+
+    elif compression == "nncf":
+        model = nncf.compress_weights(model, dataset=nncf.Dataset([x]), mode=mode)
+
+    with torch.inference_mode():
+        for _ in range(50):
+            t = time.perf_counter()
+            _ = model(static_input)
+            e = time.perf_counter()
+            print(f"Warmup forward: {(e - t)*1e3:.3f} ms")
+        torch.cuda.synchronize()
+
+    if compression == "gemlite":
+        gemlite.cache_config(config_file)
+
+    capture_stream = torch.cuda.Stream()
+    g = torch.cuda.CUDAGraph()
+
+    torch.cuda.synchronize()
+
+    with torch.cuda.stream(capture_stream):
+        g.capture_begin()
+        tmp = model(static_input)      
+        static_output.copy_(tmp)       
+        g.capture_end()
+
+    torch.cuda.synchronize()
+
+    def infer_with_graph(x: torch.Tensor):
+        static_input.copy_(x)           
+        g.replay()                       
+        return static_output            
+
+    t0 = time.perf_counter(); out = infer_with_graph(x); torch.cuda.synchronize()
+    print(f"First replay: {(time.perf_counter() - t0)*1e3:.3f} ms")
+
+    times = []
+    for _ in range(100):
+        t = time.perf_counter()
+        ch2 = infer_with_graph(x)
+        torch.cuda.synchronize()
+        times.append(time.perf_counter() - t)
+    print(f"Avg replay: {sum(times)/len(times)*1e3:.3f} ms")
+
+    if profile:
+        with prof(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as p:
+            with record_function("cuda_graph_replay"):
+                _ = infer_with_graph(x)
+
+        p.export_chrome_trace(f"with_cuda_graph_{compression}_{mode}.json")
+
+    diff = (ch1 - ch2).abs()
+    max_abs_diff = diff.max().item()
+    mean_abs_diff = diff.mean().item()
+
+    print(f"Output shapes: {ch1.shape}, {ch2.shape}")
+    print(f"Max abs difference:  {max_abs_diff:.6e}")
+    print(f"Mean abs difference: {mean_abs_diff:.6e}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--compression", type=str, default="", help="Compression, e.g. 'gemlite', 'nncf")
+    parser.add_argument("--mode", type=str, default="", help="Quantization mode, e.g. 'int8_sym'")
+    parser.add_argument("--profile", action="store_true", help="Whether to profile model and cuda graph")
+    args = parser.parse_args()
+    main(compression=args.compression, mode=args.mode, profile=args.profile)
