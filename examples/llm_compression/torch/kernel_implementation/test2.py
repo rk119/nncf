@@ -75,10 +75,6 @@ def main(compression="", mode="", profile=False, cuda_graph=False):
         gemlite.load_config(config_file)
 
         model = nncf.compress_weights(model, dataset=nncf.Dataset([x]), mode=mode, gemlite=True)
-        
-    if compression == "tinygemm":
-        model = nncf.compress_weights(model, dataset=nncf.Dataset([x]), mode=mode, awq=True)
-
     elif compression == "nncf":
         model = nncf.compress_weights(model, dataset=nncf.Dataset([x]), mode=mode)
         

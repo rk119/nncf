@@ -496,6 +496,7 @@ class WeightCompression(Algorithm):
             mode=self._mode,
             group_size=group_size,
             codebook_values=codebook_values,
+            kernel="gemlite" if self._gemlite else None,
         )
 
     def _set_weight_compression_config(
@@ -805,7 +806,7 @@ class WeightCompression(Algorithm):
                         if self._backup_mode == BackupMode.INT8_ASYM
                         else CompressWeightsMode.INT8_SYM
                     )
-                    wc_config = WeightCompressionConfig(mode=mode)
+                    wc_config = WeightCompressionConfig(mode=mode, kernel="gemlite" if self._gemlite else None)
                 weight_params = WeightCompressionParameters(
                     weight_name, node, weight_port_id, weight_shape, reduction_axes, wc_config
                 )

@@ -58,3 +58,9 @@ class PT2ConstUpdateCommand(Command):
         super().__init__(TransformationType.CHANGE)
         self.node = node
         self.value = value
+
+class PTModuleReplacementCommand(Command):
+    def __init__(self, target_node_name: str, replacement_module: nn.Module):
+        super().__init__(TransformationType.CHANGE)
+        self.target_node_name = target_node_name
+        self.replacement_module = replacement_module

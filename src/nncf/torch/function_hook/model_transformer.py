@@ -18,7 +18,7 @@ from nncf.common.graph.model_transformer import ModelTransformer
 from nncf.common.graph.transformations.commands import Command
 from nncf.common.graph.transformations.commands import TargetType
 from nncf.common.graph.transformations.layout import TransformationLayout
-from nncf.torch.function_hook.commands import PT2ConstUpdateCommand
+from nncf.torch.function_hook.commands import PT2ConstUpdateCommand, PTModuleReplacementCommand
 from nncf.torch.function_hook.commands import PT2InsertionCommand
 from nncf.torch.function_hook.hook_storage import RemovableHookHandle
 from nncf.torch.function_hook.nncf_graph.nncf_graph_builder import GraphModelWrapper
@@ -46,6 +46,7 @@ class PT2ModelTransformer(ModelTransformer[GraphModelWrapper]):
             (PT2InsertionCommand, self._apply_insertion_transformations),
             (PTBiasCorrectionCommand, self._apply_bias_correction_transformations),
             (PT2ConstUpdateCommand, self._apply_const_update_transformations),
+            (PTModuleReplacementCommand, self._apply_module_replacement_transformations)
         )
 
     def transform(self, transformation_layout: TransformationLayout) -> GraphModelWrapper:
@@ -144,6 +145,17 @@ class PT2ModelTransformer(ModelTransformer[GraphModelWrapper]):
             set_const_data(value, node, wrapped_model.model)
 
         return wrapped_model
+    
+    @staticmethod
+    def _apply_module_replacement_transformations(
+        wrapped_model: GraphModelWrapper, transformations: list[PTModuleReplacementCommand]
+    ) -> GraphModelWrapper:
+        for transformation in transformations:
+            target_node_name = transformation.target_node_name
+            replacement_module = transformation.replacement_module
+            replace_module(wrapped_model.model, target_node_name, replacement_module)
+
+        return wrapped_model
 
 
 def insert_hook(model: nn.Module, hook: nn.Module, target_point: PTTargetPoint) -> RemovableHookHandle:
@@ -164,3 +176,10 @@ def insert_hook(model: nn.Module, hook: nn.Module, target_point: PTTargetPoint) 
     ):
         return register_pre_function_hook(model=model, op_name=target_name, port_id=port_id, hook=hook)
     return register_post_function_hook(model=model, op_name=target_name, port_id=port_id, hook=hook)
+
+def replace_module(model: nn.Module, target_node_name: str, replacement_module: nn.Module) -> None:
+    for name, child in model.named_children():
+        if name == target_node_name[0].target_node_name:
+            setattr(model, name, replacement_module)
+            return
+        replace_module(child, target_node_name, replacement_module)

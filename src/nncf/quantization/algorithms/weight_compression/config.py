@@ -39,7 +39,7 @@ class WeightCompressionConfig:
     mode: Optional[CompressWeightsMode] = CompressWeightsMode.INT8_ASYM
     group_size: Optional[int] = -1
     codebook_values: Optional[TTensor] = None
-    gemlite: Optional[bool] = False
+    kernel: Optional[str] = None
 
     @property
     def num_bits(self):

@@ -15,6 +15,7 @@ from enum import Enum
 from functools import partial
 from typing import Any, Iterable, Optional, Union
 
+import gemlite
 import numpy as np
 import torch
 from torch import distributed
@@ -34,6 +35,8 @@ from nncf.common.quantization.structs import QuantizerConfig
 from nncf.common.quantization.structs import QuantizerSpec
 from nncf.common.utils.debug import is_debug
 from nncf.common.utils.registry import Registry
+from nncf.parameters import CompressWeightsMode
+from nncf.quantization.algorithms.weight_compression.weight_lowering import ungroup_weights
 from nncf.torch.checkpoint_loading import OPTIONAL_PARAMETERS_REGISTRY
 from nncf.torch.dynamic_graph.context import no_nncf_trace
 from nncf.torch.functions import clamp
@@ -1376,6 +1379,149 @@ class BaseWeightsDecompressor(nn.Module, ABC):
         :return: The packed tensor.
         """
 
+        
+class BaseKernel(nn.Module, ABC):
+    @abstractmethod
+    def pack_weight(self, weight: torch.Tensor) -> torch.Tensor:
+        """
+        Pack the given weight tensor according to the selected quantization mode.
+
+        :param weight: The tensor containing the weight values to be packed.
+        :return: The packed tensor.
+        """
+        
+class Gemlite(BaseKernel):
+    def __init__(self, scale: torch.Tensor, zero_point: torch.Tensor, bias: torch.Tensor, mode: CompressWeightsMode, reduction_axis: int, group_size: int = 64):
+        super().__init__()
+        self.register_buffer("_scale", scale)
+        self.register_buffer("_zero_point", zero_point)
+        self.register_buffer("_bias", bias)
+        self._group_size = group_size
+        self._mode = mode
+        self._reduction_axis = reduction_axis
+
+    def pack_weight(self, weight: torch.Tensor) -> torch.Tensor:
+        if weight.device.type != "cuda":       
+            weight = weight.cuda()
+
+        bit_width = 8
+        scale = self._scale
+        zero_point = self._zero_point
+        
+        if self._mode in [CompressWeightsMode.INT4_SYM, CompressWeightsMode.INT4_ASYM]:
+            bit_width = 4
+            weight = ungroup_weights(weight, self._reduction_axis).data
+            if zero_point is None:
+                weight = (weight + 8).to(torch.uint8)
+                zero_point = torch.zeros_like(scale, dtype=torch.int32)
+
+        scale = scale.to(torch.float16)
+        out_f, in_f = weight.shape
+        if not weight.is_contiguous():
+            weight = weight.contiguous()
+        if bit_width == 8 and self._group_size == in_f and zero_point is None:
+            gl = gemlite.helper.A16W8(device=weight.device).from_weights(
+                     weight, scales=scale, bias=None)
+        else:
+            gl = gemlite.helper.A16Wn(device=weight.device).from_weights(
+                     weight, scale, zero_point, bit_width, self._group_size, bias=None)
+
+        packed_w, s, zp = gl.get_tensor_args()
+        self.register_buffer("_packed_weight", packed_w.to(weight.device).contiguous())
+        self.register_buffer("_scale", s)
+        self.register_buffer("_zero_point", zp)
+        self._gemlite_meta = gl.get_meta_args()
+
+    def forward(self, x) -> torch.Tensor:
+        return gemlite.core.forward_functional(
+            x=x,
+            bias=self._bias,
+            tensor_args=(self._packed_weight, self._scale, self._zero_point),
+            meta_args=self._gemlite_meta,
+        )
+        
+# class Tinygemm(BaseKernel):
+#     def __init__(self, scale: torch.Tensor, zero_point: torch.Tensor, bias: torch.Tensor, mode: CompressWeightsMode, reduction_axis: int, group_size: int = 64):
+#         super().__init__()
+#         self.register_buffer("_scale", scale)
+#         self.register_buffer("_zero_point", zero_point)
+#         self.register_buffer("_bias", bias)
+#         self._group_size = group_size
+#         self._mode = mode
+#         self._reduction_axis = reduction_axis
+#         self._inner_k_tiles = 8
+
+#     def pack_weight(self, weight: torch.Tensor) -> torch.Tensor:
+#         weight = ungroup_weights(weight, self._reduction_axis).data
+#         scale = self._scale.squeeze(-1)
+#         zero_point = self._zero_point.squeeze(-1) if self._zero_point is not None else None
+#         self._out = weight.shape[0]
+#         def quant_2d(weight_2d):
+#             weight_2d = (weight_2d[::, ::2] << 4 | weight_2d[::, 1::2]).to(
+#                     torch.uint8
+#             )
+#             breakpoint()
+#             return torch.ops.aten._convert_weight_to_int4pack(
+#                 weight_2d.contiguous(), self._inner_k_tiles
+#             )
+
+#         if weight.dim() == 3:
+#             num_experts = weight.shape[0]
+#             packed_weight_list = []
+#             for expert in range(num_experts):
+#                 packed_weight_list.append(quant_2d(weight[expert]).unsqueeze(0))
+#             self.register_buffer("_packed_weight",torch.cat(packed_weight_list, dim=0))
+#             scale = scale.reshape(weight.shape[0], weight.shape[-2], -1)
+#             zero_point = (
+#                 zero_point.reshape(weight.shape[0], weight.shape[-2], -1)
+#                 if zero_point is not None
+#                 else None
+#             )
+#         else:
+#             assert weight.dim() == 2
+#             self.register_buffer("_packed_weight", quant_2d(weight))
+#             scale = scale.reshape(weight.shape[0], -1)
+#             zero_point = (
+#                 zero_point.reshape(weight.shape[0], -1)
+#                 if zero_point is not None
+#                 else None
+#             )
+            
+#         from torchao.quantization.utils import pack_tinygemm_scales_and_zeros
+
+#         self._scale_and_zero = pack_tinygemm_scales_and_zeros(scale, zero_point.to(scale.dtype) if zero_point is not None else None, scale.dtype)
+
+#     def forward(self, x) -> torch.Tensor:
+#         act_mat = x
+#         # weight is packed from padded (out_features, in_features) weight tensor
+#         # (same dimension requirement as F.linear weight)
+#         packed_weight = self._packed_weight
+#         scale_and_zero = self._scale_and_zero
+
+#         orig_act_size = act_mat.size()
+#         orig_dtype = act_mat.dtype
+
+#         # reshape and pad activation
+#         act_mat = act_mat.reshape(-1, act_mat.shape[-1]).to(torch.bfloat16)
+#         pad_size = find_multiple(act_mat.shape[-1], 1024)
+#         act_mat = torch.nn.functional.pad(act_mat, (0, pad_size - act_mat.shape[-1]))
+
+#         groupsize = self._group_size 
+        
+#         if act_mat.numel() == 0:  # handling for empty input
+#             y = act_mat
+#         else:
+#             y = torch.ops.aten._weight_int4pack_mm(
+#                 act_mat.contiguous(), packed_weight, groupsize, scale_and_zero
+#             )
+#         # remove out_feature padding
+#         orig_out_features = self._out
+#         y = y[:, :orig_out_features]
+#         y = y.reshape(*orig_act_size[:-1], orig_out_features)
+
+#         if self._bias is not None:
+#             y += self._bias
+#         return y.to(orig_dtype)
 
 class INT8AsymmetricWeightsDecompressor(BaseWeightsDecompressor):
     """

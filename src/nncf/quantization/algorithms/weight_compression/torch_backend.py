@@ -50,7 +50,7 @@ from nncf.quantization.algorithms.weight_compression.parameters import Compresse
 from nncf.quantization.algorithms.weight_compression.weight_lowering import compress_weight
 from nncf.tensor import Tensor
 from nncf.tensor.definitions import TensorDataType
-from nncf.torch.function_hook.commands import PT2InsertionCommand
+from nncf.torch.function_hook.commands import PT2InsertionCommand, PTModuleReplacementCommand
 from nncf.torch.function_hook.model_transformer import PT2ModelTransformer
 from nncf.torch.function_hook.nncf_graph.nncf_graph_builder import GraphModelWrapper
 from nncf.torch.graph.graph import PTTargetPoint
@@ -71,12 +71,11 @@ from nncf.torch.quantization.layers import INT4AsymmetricWeightsDecompressor
 from nncf.torch.quantization.layers import INT4SymmetricWeightsDecompressor
 from nncf.torch.quantization.layers import INT8AsymmetricWeightsDecompressor
 from nncf.torch.quantization.layers import INT8SymmetricWeightsDecompressor
+from nncf.torch.quantization.layers import Gemlite
 from nncf.torch.quantization.layers import PTLoraNLSSpec
 from nncf.torch.quantization.layers import PTLoraSpec
 from nncf.torch.quantization.layers import PTQuantizerSpec
 from nncf.torch.quantization.layers import SQMultiply
-from nncf.torch.quantization.kernel_tensor_impl import GemWeight, GemliteTensorImpl
-
 
 class PTWeightCompressionAlgoBackend(WeightCompressionAlgoBackend):
     TARGET_TYPE_TO_PT_INS_TYPE_MAP = {
@@ -409,14 +408,24 @@ class PTWeightCompressionAlgoBackend(WeightCompressionAlgoBackend):
 
         compression_config = wc_params.compression_config
         # creates weight decompressor
-        if compression_config.gemlite and isinstance(module, torch.nn.Linear):
-            impl = GemliteTensorImpl.pack_weights(compressed_weight.tensor.data, compressed_weight.scale.data, compressed_weight.zero_point.data if compressed_weight.zero_point is not None else None,
-                mode=compression_config.mode,
+        if compression_config.kernel == "gemlite" and isinstance(module, torch.nn.Linear):
+            decompressor = Gemlite(
+                compressed_weight.scale.data,
+                compressed_weight.zero_point.data if compressed_weight.zero_point is not None else None,
+                bias=module.bias.data if module.bias is not None else None,
                 group_size=weight_shape[-1] if compression_config.group_size == -1 else compression_config.group_size,
+                mode=compression_config.mode,
+                reduction_axis=wc_params.reduction_axes[0],
             )
-            module.weight = torch.nn.Parameter(GemWeight(impl), requires_grad=False)
-            return None
-        if compression_config.mode == CompressWeightsMode.INT8_SYM:
+
+            packed_tensor = decompressor.pack_weight(compressed_weight.tensor.data)
+
+            return PTModuleReplacementCommand(
+                [PTTargetPoint(TargetType.LAYER, target_node_name=module_name)],
+                decompressor,
+            )
+
+        elif compression_config.mode == CompressWeightsMode.INT8_SYM:
             decompressor = INT8SymmetricWeightsDecompressor(compressed_weight.scale.data, result_dtype=weight_dtype)
         elif compression_config.mode == CompressWeightsMode.INT8_ASYM:
             decompressor = INT8AsymmetricWeightsDecompressor(
